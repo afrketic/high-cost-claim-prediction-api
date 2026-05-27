@@ -6,10 +6,24 @@ from io import BytesIO
 from src.config import MODEL_ARTIFACT_PATH
 from src.feature_engineering import add_engineered_features
 from src.data_processing import validate_prediction_dataset
+from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI(
     title="High-Cost Claim Prediction API",
     description="API for predicting annual paid claims from member-level healthcare data."
+)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://www.alexknowsai.com",
+        "https://alexknowsai.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.get("/")
