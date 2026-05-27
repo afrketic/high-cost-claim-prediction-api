@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 
 import pandas as pd
 import joblib
@@ -88,7 +89,7 @@ def assign_stop_loss_risk_tier(predicted_claims):
 
 @app.post("/predict")
 async def predict(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     high_cost_threshold: float = 150000
 ):
     """
@@ -115,17 +116,39 @@ async def predict(
         }
 
     # ============================================
-    # READ CSV CONTENTS
+    # READ AND MERGE ALL CSV FILES
     # ============================================
 
-    contents = await file.read()
+    dataframes = []
 
-    df = pd.read_csv(
-        BytesIO(contents)
+    for file in files:
+
+        if not file.filename.endswith(".csv"):
+
+            return {
+                "error": (
+                    f"{file.filename} is not a CSV file."
+                )
+            }
+
+        contents = await file.read()
+
+        temp_df = pd.read_csv(
+            BytesIO(contents)
+        )
+
+        temp_df.columns = temp_df.columns.str.strip()
+
+        # Track source file
+        temp_df["source_file"] = file.filename
+
+        dataframes.append(temp_df)
+
+    # Merge all uploaded files
+    df = pd.concat(
+        dataframes,
+        ignore_index=True
     )
-
-    # Clean column names
-    df.columns = df.columns.str.strip()
 
     # ============================================
     # LOAD TRAINED MODEL ARTIFACT
