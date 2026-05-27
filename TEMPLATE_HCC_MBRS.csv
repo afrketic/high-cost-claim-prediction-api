@@ -1,0 +1,6 @@
+member_age,prior_year_paid_claims,inpatient_admissions,er_visits,specialty_rx_count,rx_paid_claims,medical_paid_claims,chronic_condition_count,comorbidity_score
+34,12500.5,0,1,0,850.25,11650.25,1,1.2
+58,245000.75,3,4,5,98500.4,146500.35,5,6.8
+46,88450.1,1,2,2,12250.75,76200.8,3,3.9
+71,512300.0,5,6,8,185000.9,327299.1,7,8.7
+29,9800.25,0,1,0,420.1,9380.15,0,0.5

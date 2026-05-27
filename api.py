@@ -31,12 +31,75 @@ app.add_middleware(
 )
 
 
+REQUIRED_PREDICTION_COLUMNS = [
+    "member_age",
+    "prior_year_paid_claims",
+    "inpatient_admissions",
+    "er_visits",
+    "specialty_rx_count",
+    "rx_paid_claims",
+    "medical_paid_claims"
+]
+
+OPTIONAL_PREDICTION_COLUMNS = [
+    "chronic_condition_count",
+    "comorbidity_score"
+]
+
+
 @app.get("/")
 def home():
     return {
         "message": "High-Cost Claim Prediction API is running.",
         "endpoint": "/predict"
     }
+
+
+def create_error_workbook(error_rows):
+    output = BytesIO()
+
+    error_df = pd.DataFrame(error_rows)
+
+    required_df = pd.DataFrame({
+        "required_columns": REQUIRED_PREDICTION_COLUMNS
+    })
+
+    optional_df = pd.DataFrame({
+        "optional_columns": OPTIONAL_PREDICTION_COLUMNS
+    })
+
+    instructions_df = pd.DataFrame({
+        "instructions": [
+            "Upload rejected.",
+            "Please use the downloadable TEMPLATE_HCC_MBRS.csv file.",
+            "Each uploaded CSV must include all required columns.",
+            "Optional columns may be included if available.",
+            "If optional columns are missing, the model will estimate proxy values."
+        ]
+    })
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        error_df.to_excel(writer, sheet_name="Upload Errors", index=False)
+        required_df.to_excel(writer, sheet_name="Required Fields", index=False)
+        optional_df.to_excel(writer, sheet_name="Optional Fields", index=False)
+        instructions_df.to_excel(writer, sheet_name="Instructions", index=False)
+
+    output.seek(0)
+    return output
+
+
+def stream_excel_workbook(workbook, filename, status_code=200):
+    return StreamingResponse(
+        workbook,
+        status_code=status_code,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 
 def assign_stop_loss_risk_tier(predicted_claims):
@@ -56,51 +119,70 @@ async def predict(
     high_cost_threshold: float = 150000
 ):
     dataframes = []
+    validation_errors = []
 
     for uploaded_file in files:
-
         if not uploaded_file.filename.endswith(".csv"):
-            error_excel = BytesIO()
-
-            error_df = pd.DataFrame({
-                "error": [f"{uploaded_file.filename} is not a CSV file."]
+            validation_errors.append({
+                "file_name": uploaded_file.filename,
+                "error_type": "Invalid file type",
+                "details": "Only .csv files are accepted.",
+                "recommended_action": "Download and use TEMPLATE_HCC_MBRS.csv."
             })
+            continue
 
-            with pd.ExcelWriter(error_excel, engine="openpyxl") as writer:
-                error_df.to_excel(
-                    writer,
-                    sheet_name="Error",
-                    index=False
-                )
+        try:
+            contents = await uploaded_file.read()
+            temp_df = pd.read_csv(BytesIO(contents))
+            temp_df.columns = temp_df.columns.str.strip()
+        except Exception as e:
+            validation_errors.append({
+                "file_name": uploaded_file.filename,
+                "error_type": "File read error",
+                "details": str(e),
+                "recommended_action": "Confirm the file is a valid CSV template."
+            })
+            continue
 
-            error_excel.seek(0)
+        missing_required_columns = [
+            column for column in REQUIRED_PREDICTION_COLUMNS
+            if column not in temp_df.columns
+        ]
 
-            return StreamingResponse(
-                error_excel,
-                media_type=(
-                    "application/vnd.openxmlformats-officedocument."
-                    "spreadsheetml.sheet"
-                ),
-                headers={
-                    "Content-Disposition":
-                    "attachment; filename=prediction_error.xlsx"
-                }
-            )
-
-        contents = await uploaded_file.read()
-
-        temp_df = pd.read_csv(
-            BytesIO(contents)
-        )
-
-        temp_df.columns = (
-            temp_df.columns
-            .str.strip()
-        )
+        if missing_required_columns:
+            validation_errors.append({
+                "file_name": uploaded_file.filename,
+                "error_type": "Missing required columns",
+                "details": ", ".join(missing_required_columns),
+                "recommended_action": "Download and use TEMPLATE_HCC_MBRS.csv."
+            })
+            continue
 
         temp_df["source_file"] = uploaded_file.filename
-
         dataframes.append(temp_df)
+
+    if validation_errors:
+        error_workbook = create_error_workbook(validation_errors)
+        return stream_excel_workbook(
+            error_workbook,
+            "prediction_error.xlsx",
+            status_code=400
+        )
+
+    if not dataframes:
+        error_workbook = create_error_workbook([
+            {
+                "file_name": "No valid files",
+                "error_type": "No processable data",
+                "details": "No uploaded file passed validation.",
+                "recommended_action": "Download and use TEMPLATE_HCC_MBRS.csv."
+            }
+        ])
+        return stream_excel_workbook(
+            error_workbook,
+            "prediction_error.xlsx",
+            status_code=400
+        )
 
     combined_df = pd.concat(
         dataframes,
@@ -115,9 +197,24 @@ async def predict(
     scaler = artifacts["scaler"]
     feature_columns = artifacts["feature_columns"]
 
-    scored_df = validate_prediction_dataset(
-        combined_df
-    )
+    try:
+        scored_df = validate_prediction_dataset(
+            combined_df
+        )
+    except Exception as e:
+        error_workbook = create_error_workbook([
+            {
+                "file_name": "Combined upload",
+                "error_type": "Schema validation error",
+                "details": str(e),
+                "recommended_action": "Download and use TEMPLATE_HCC_MBRS.csv."
+            }
+        ])
+        return stream_excel_workbook(
+            error_workbook,
+            "prediction_error.xlsx",
+            status_code=400
+        )
 
     scored_df = add_engineered_features(
         scored_df
@@ -145,9 +242,7 @@ async def predict(
 
     scored_df["risk_tier"] = scored_df[
         "predicted_annual_paid_claims"
-    ].apply(
-        assign_stop_loss_risk_tier
-    )
+    ].apply(assign_stop_loss_risk_tier)
 
     scored_df = scored_df.sort_values(
         by="predicted_annual_paid_claims",
@@ -161,7 +256,6 @@ async def predict(
     output_excel = BytesIO()
 
     with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
-
         high_cost_df.to_excel(
             writer,
             sheet_name="High Cost Members",
@@ -176,14 +270,8 @@ async def predict(
 
     output_excel.seek(0)
 
-    return StreamingResponse(
+    return stream_excel_workbook(
         output_excel,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-        headers={
-            "Content-Disposition":
-            "attachment; filename=high_cost_claim_prediction_output.xlsx"
-        }
+        "high_cost_claim_prediction_output.xlsx",
+        status_code=200
     )
