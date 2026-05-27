@@ -4,3 +4,6 @@ numpy
 scikit-learn
 matplotlib
 joblib
+fastapi
+uvicorn
+python-multipart
