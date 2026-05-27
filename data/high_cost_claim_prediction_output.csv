@@ -1,0 +1,6 @@
+member_age,chronic_condition_count,prior_year_paid_claims,inpatient_admissions,er_visits,specialty_rx_count,rx_paid_claims,medical_paid_claims,comorbidity_score,total_utilization_events,rx_to_medical_ratio,prior_claims_per_condition,specialty_rx_intensity,inpatient_er_interaction,predicted_annual_paid_claims
+42,2,21000,1,2,1,6500,14500,2,3,0.4482758620689655,7000,2,2,28626.18
+57,4,95000,3,4,3,43000,52000,4.5,7,0.8269230769230769,19000,13.5,12,132565.63
+63,5,160000,4,5,5,76000,84000,5.8,9,0.9047619047619048,26666.666666666668,29,20,222477.59
+35,1,9000,0,1,0,1200,7800,1,1,0.15384615384615385,4500,0,0,9730.25
+70,6,260000,6,7,6,124000,136000,6.9,13,0.9117647058823529,37142.857142857145,41.400000000000006,42,351557.4
