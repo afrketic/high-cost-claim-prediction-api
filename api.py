@@ -1,38 +1,25 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
 from typing import List
+from io import BytesIO, StringIO
 
 import pandas as pd
 import joblib
-
-from io import BytesIO
 
 from src.config import MODEL_ARTIFACT_PATH
 from src.feature_engineering import add_engineered_features
 from src.data_processing import validate_prediction_dataset
 
 
-# ============================================================
-# FASTAPI APPLICATION
-# ============================================================
-
 app = FastAPI(
     title="High-Cost Claim Prediction API",
     description=(
-        "API for predicting annual paid healthcare claims "
-        "from member-level healthcare utilization data."
+        "Enterprise batch API for predicting annual paid healthcare claims "
+        "from one or multiple member-level healthcare CSV files."
     )
 )
-
-
-# ============================================================
-# CORS CONFIGURATION
-# ============================================================
-# TEMPORARILY OPEN FOR TESTING
-# Later this can be restricted to:
-# - https://www.alexknowsai.com
-# - https://alexknowsai.com
-# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,190 +30,97 @@ app.add_middleware(
 )
 
 
-# ============================================================
-# ROOT ENDPOINT
-# ============================================================
-
 @app.get("/")
 def home():
-
     return {
         "message": "High-Cost Claim Prediction API is running.",
         "endpoint": "/predict"
     }
 
 
-# ============================================================
-# RISK TIER LOGIC
-# ============================================================
-
 def assign_stop_loss_risk_tier(predicted_claims):
-    """
-    Assigns a business-friendly risk tier
-    based on predicted annual paid claims.
-    """
-
     if predicted_claims >= 250000:
-
         return "Very High Risk / Potential Stop-Loss Trigger"
-
     elif predicted_claims >= 150000:
-
         return "High Risk"
-
     elif predicted_claims >= 75000:
-
         return "Moderate Risk"
-
     else:
-
         return "Lower Risk"
 
-
-# ============================================================
-# PREDICTION ENDPOINT
-# ============================================================
 
 @app.post("/predict")
 async def predict(
     files: List[UploadFile] = File(...),
     high_cost_threshold: float = 150000
 ):
-    """
-    Upload a healthcare claims CSV file
-    and return predicted annual paid claims.
-
-    Also applies:
-    - risk tier classification
-    - user-defined high-cost threshold
-    - high-cost member flag
-    """
-
-    # ============================================
-    # VALIDATE FILE TYPE
-    # ============================================
-
-    if not file.filename.endswith(".csv"):
-
-        return {
-            "error": (
-                ".csv file needed. "
-                "Please try again entering a file path using a .csv file."
-            )
-        }
-
-    # ============================================
-    # READ AND MERGE ALL CSV FILES
-    # ============================================
-
     dataframes = []
 
-    for file in files:
+    for uploaded_file in files:
 
-        if not file.filename.endswith(".csv"):
+        if not uploaded_file.filename.endswith(".csv"):
+            error_csv = StringIO()
+            pd.DataFrame({
+                "error": [f"{uploaded_file.filename} is not a CSV file."]
+            }).to_csv(error_csv, index=False)
 
-            return {
-                "error": (
-                    f"{file.filename} is not a CSV file."
-                )
-            }
+            error_csv.seek(0)
 
-        contents = await file.read()
+            return StreamingResponse(
+                iter([error_csv.getvalue()]),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": "attachment; filename=prediction_error.csv"
+                }
+            )
 
-        temp_df = pd.read_csv(
-            BytesIO(contents)
-        )
+        contents = await uploaded_file.read()
 
+        temp_df = pd.read_csv(BytesIO(contents))
         temp_df.columns = temp_df.columns.str.strip()
-
-        # Track source file
-        temp_df["source_file"] = file.filename
+        temp_df["source_file"] = uploaded_file.filename
 
         dataframes.append(temp_df)
 
-    # Merge all uploaded files
-    df = pd.concat(
+    combined_df = pd.concat(
         dataframes,
         ignore_index=True
     )
 
-    # ============================================
-    # LOAD TRAINED MODEL ARTIFACT
-    # ============================================
-
-    artifacts = joblib.load(
-        MODEL_ARTIFACT_PATH
-    )
+    artifacts = joblib.load(MODEL_ARTIFACT_PATH)
 
     model = artifacts["model"]
-
     scaler = artifacts["scaler"]
-
     feature_columns = artifacts["feature_columns"]
 
-    # ============================================
-    # VALIDATE INPUT DATASET
-    # ============================================
+    scored_df = validate_prediction_dataset(combined_df)
+    scored_df = add_engineered_features(scored_df)
 
-    df = validate_prediction_dataset(df)
-
-    # ============================================
-    # FEATURE ENGINEERING
-    # ============================================
-
-    df = add_engineered_features(df)
-
-    # ============================================
-    # BUILD FEATURE MATRIX
-    # ============================================
-
-    X = df[feature_columns]
-
-    # ============================================
-    # SCALE FEATURES
-    # ============================================
-
+    X = scored_df[feature_columns]
     X_scaled = scaler.transform(X)
-
-    # ============================================
-    # GENERATE PREDICTIONS
-    # ============================================
 
     predictions = model.predict(X_scaled)
 
-    # ============================================
-    # STORE PREDICTIONS
-    # ============================================
+    scored_df["predicted_annual_paid_claims"] = predictions.round(2)
 
-    df["predicted_annual_paid_claims"] = (
-        predictions.round(2)
+    scored_df["high_cost_threshold"] = high_cost_threshold
+
+    scored_df["is_high_cost_member"] = (
+        scored_df["predicted_annual_paid_claims"] >= high_cost_threshold
     )
 
-    # ============================================
-    # APPLY USER THRESHOLD
-    # ============================================
-
-    df["high_cost_threshold"] = (
-        high_cost_threshold
-    )
-
-    df["is_high_cost_member"] = (
-        df["predicted_annual_paid_claims"] >=
-        high_cost_threshold
-    )
-
-    # ============================================
-    # APPLY RISK TIERS
-    # ============================================
-
-    df["risk_tier"] = df[
+    scored_df["risk_tier"] = scored_df[
         "predicted_annual_paid_claims"
     ].apply(assign_stop_loss_risk_tier)
 
-    # ============================================
-    # RETURN JSON RESPONSE
-    # ============================================
+    output_csv = StringIO()
+    scored_df.to_csv(output_csv, index=False)
+    output_csv.seek(0)
 
-    return df.to_dict(
-        orient="records"
+    return StreamingResponse(
+        iter([output_csv.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=high_cost_claim_prediction_output.csv"
+        }
     )
